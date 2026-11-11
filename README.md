@@ -236,7 +236,7 @@ Android 8.0（API 26）及以上。
 </details>
 
 <details>
-<summary><b>v1.1.0（2026-11-11）</b></summary>
+<summary><b>v1.1.0(内测)（2026-11-11）</b></summary>
 
 - 🧹 刷新书库自动清理失效记录
 - ☑️ 书架批量管理（多选移除 / 批量标记已看完）
@@ -247,7 +247,7 @@ Android 8.0（API 26）及以上。
 </details>
 
 <details>
-<summary><b>v1.0.0（2026-11-07）</b></summary>
+<summary><b>v1.0.0(内测)（2026-11-07）</b></summary>
 
 - 🎉 首个版本：全格式支持、三种阅读方向、单双页、四种翻页效果、书签、进度记忆、深浅主题、护眼模式、自定义亮度
 </details>
