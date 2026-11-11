@@ -225,7 +225,6 @@ object Prefs {
             rotation = sp.getInt("rotation", 0),
             volumeKeyPaging = sp.getBoolean("volumeKeys", true),
             keepScreenOn = sp.getBoolean("keepOn", true),
-            autoPlaySec = sp.getInt("autoPlay", 0),
             autoScrollSpeed = sp.getInt("autoScroll", 0),
             themeMode = enumPref("theme", ReaderSettings().themeMode),
             eyeCare = sp.getBoolean("eyeCare", false),
@@ -242,7 +241,6 @@ object Prefs {
             putInt("rotation", value.rotation)
             putBoolean("volumeKeys", value.volumeKeyPaging)
             putBoolean("keepOn", value.keepScreenOn)
-            putInt("autoPlay", value.autoPlaySec)
             putInt("autoScroll", value.autoScrollSpeed)
             putString("theme", value.themeMode.name)
             putBoolean("eyeCare", value.eyeCare)

@@ -37,7 +37,6 @@ import androidx.compose.material.icons.filled.Delete
 import androidx.compose.material.icons.filled.FirstPage
 import androidx.compose.material.icons.filled.LastPage
 import androidx.compose.material.icons.filled.Pause
-import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.SkipNext
 import androidx.compose.material.icons.filled.SkipPrevious
@@ -82,7 +81,6 @@ import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.flow.first
 import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.FlowRow
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlin.math.max
 
@@ -109,7 +107,6 @@ fun ReaderScreen(book: Book, onClose: () -> Unit) {
 
     var menuOpen by remember { mutableStateOf(false) }
     var sheet by remember { mutableStateOf(Sheet.NONE) }
-    var autoPlay by remember { mutableStateOf(false) }
     var autoScroll by remember { mutableStateOf(false) }
 
     val horizontal = vm.direction != ReadDirection.VERTICAL
@@ -179,10 +176,10 @@ fun ReaderScreen(book: Book, onClose: () -> Unit) {
         }
     }
 
-    // 方向 / 布局切换后把视图对齐回当前页
+    // 方向 / 布局切换、或自动拆页探测重建页面序列后，把视图对齐回当前页
     //（RTL 反转与单双页切换都会改变 pager 页号 ↔ spec 序号的映射）
     // 仅在初始恢复完成后才参与对齐，避免与恢复跳转竞争
-    LaunchedEffect(vm.direction, vm.layout) {
+    LaunchedEffect(vm.direction, vm.layout, vm.pageSpecs.size) {
         if (vm.restored && vm.pageSpecs.isNotEmpty()) scrollToSpec(vm.currentSpecIndex, animated = false)
     }
 
@@ -220,36 +217,30 @@ fun ReaderScreen(book: Book, onClose: () -> Unit) {
         onDispose { }
     }
 
-    // 自动翻页
-    LaunchedEffect(autoPlay, vm.settings.autoPlaySec) {
-        if (!autoPlay || vm.settings.autoPlaySec <= 0) return@LaunchedEffect
-        while (true) {
-            delay(vm.settings.autoPlaySec * 1000L)
-            val atEnd = if (vm.direction == ReadDirection.VERTICAL)
-                vm.currentSpecIndex >= vm.pageSpecs.lastIndex
-            else pagerState.currentPage >= pagerState.pageCount - 1
-            if (atEnd) { autoPlay = false; break }
-            turnPage(true)
-        }
-    }
-// 自动滚动（条漫）
+    // 自动滚动（条漫）：每帧按速度做原始像素滚动（dispatchRawDelta），
+    // 滚到底返回 0 即自动停止；期间定期保存进度并预取后续页
     LaunchedEffect(autoScroll, vm.settings.autoScrollSpeed, vm.direction) {
-        if (!autoScroll || vm.direction != ReadDirection.VERTICAL || vm.settings.autoScrollSpeed <= 0)
-            return@LaunchedEffect
+        if (autoScroll && vm.direction != ReadDirection.VERTICAL) autoScroll = false
+        if (!autoScroll) return@LaunchedEffect
+        val speed = vm.settings.autoScrollSpeed.toFloat()
+        if (speed <= 0f) { autoScroll = false; return@LaunchedEffect }
         var last = 0L
+        var acc = 0f
         while (true) {
             val t = androidx.compose.runtime.withFrameNanos { it }
             if (last != 0L) {
                 val dt = (t - last) / 1e9f
-                val deltaPx = (vm.settings.autoScrollSpeed * dt).toInt()
-                val before = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-                listState.scrollToItem(
-                    listState.firstVisibleItemIndex,
-                    listState.firstVisibleItemScrollOffset + deltaPx
-                )
-                val after = listState.firstVisibleItemIndex to listState.firstVisibleItemScrollOffset
-                // 位置不再变化 = 已滚到底
-                if (deltaPx > 0 && before == after) { autoScroll = false; break }
+                val consumed = listState.dispatchRawDelta(speed * dt)
+                acc += consumed
+                if (acc > 1500f) {
+                    acc = 0f
+                    vm.onPageSettled(listState.firstVisibleItemIndex)  // 进度 + 预取
+                }
+                if (consumed == 0f) {   // 已滚到底
+                    vm.onPageSettled(listState.firstVisibleItemIndex)
+                    autoScroll = false
+                    break
+                }
             }
             last = t
         }
@@ -315,15 +306,15 @@ fun ReaderScreen(book: Book, onClose: () -> Unit) {
         ) {
             BottomMenu(
                 vm = vm,
-                autoPlay = autoPlay,
                 autoScroll = autoScroll,
-                onToggleAutoPlay = {
-                    autoPlay = !autoPlay
-                    if (autoPlay) menuOpen = false
-                },
                 onToggleAutoScroll = {
                     autoScroll = !autoScroll
-                    if (autoScroll) menuOpen = false
+                    if (autoScroll) {
+                        // 未设置过速度时给一个舒适默认值，保证一键即可用
+                        if (vm.settings.autoScrollSpeed <= 0)
+                            vm.updateSettings { it.copy(autoScrollSpeed = 200) }
+                        menuOpen = false
+                    }
                 },
                 onSeek = { jumpTo(it) },
                 onTurn = { turnPage(it) },
@@ -387,13 +378,11 @@ private fun TopMenu(
     }
 }
 
-/** 底部菜单：页码滑条 + 翻页/自动按钮 */
+/** 底部菜单：页码滑条 + 方向/效果快捷切换 + 翻页/自动下滑按钮 */
 @Composable
 private fun BottomMenu(
     vm: ReaderViewModel,
-    autoPlay: Boolean,
     autoScroll: Boolean,
-    onToggleAutoPlay: () -> Unit,
     onToggleAutoScroll: () -> Unit,
     onSeek: (Int) -> Unit,
     onTurn: (Boolean) -> Unit,
@@ -483,13 +472,6 @@ private fun BottomMenu(
                             tint = if (autoScroll) Color(0xFFFFC107) else Color.White
                         )
                     }
-                }
-                IconButton(onClick = onToggleAutoPlay) {
-                    Icon(
-                        if (autoPlay) Icons.Filled.Pause else Icons.Filled.PlayArrow,
-                        "自动翻页",
-                        tint = if (autoPlay) Color(0xFFFFC107) else Color.White
-                    )
                 }
                 IconButton(onClick = { onTurn(true) }) { Icon(Icons.Filled.SkipNext, "下一页", tint = Color.White) }
                 IconButton(onClick = { onSeek(count - 1) }) { Icon(Icons.Filled.LastPage, "末页", tint = Color.White) }
@@ -621,20 +603,6 @@ private fun ReaderSettingsSheet(
             }
 
             SettingSection("自动阅读") {
-                Column {
-                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                        Text("自动翻页间隔")
-                        Text(if (s.autoPlaySec <= 0) "关闭" else "${s.autoPlaySec} 秒")
-                    }
-                    Slider(
-                        value = s.autoPlaySec.toFloat(),
-                        onValueChange = {
-                            vm.updateSettings { st -> st.copy(autoPlaySec = ((it / 5).toInt() * 5).coerceIn(0, 120)) }
-                        },
-                        valueRange = 0f..120f,
-                        modifier = Modifier.fillMaxWidth()
-                    )
-                }
                 if (vm.direction == ReadDirection.VERTICAL) {
                     Column {
                         Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {

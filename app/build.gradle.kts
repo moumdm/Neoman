@@ -12,8 +12,8 @@ android {
         applicationId = "com.local.comicreader"
         minSdk = 26
         targetSdk = 34
-        versionCode = 3
-        versionName = "1.1.1"
+        versionCode = 5
+        versionName = "1.1.2"
     }
 
     buildTypes {

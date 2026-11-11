@@ -15,7 +15,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.requiredWidth
+import androidx.compose.foundation.layout.requiredHeight
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyListState
 import androidx.compose.foundation.lazy.itemsIndexed
@@ -26,15 +26,16 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clipToBounds
 import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.TransformOrigin
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.PointerEvent
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.layout.onSizeChanged
@@ -46,7 +47,6 @@ import com.local.comicreader.data.PageEffect
 import com.local.comicreader.data.PageLayout
 import com.local.comicreader.data.PageSpec
 import com.local.comicreader.data.ReadDirection
-import kotlinx.coroutines.launch
 import kotlin.math.abs
 
 /**
@@ -72,24 +72,26 @@ fun ReaderPager(
     val bg = vm.settings.background
 
     if (direction == ReadDirection.VERTICAL) {
-        // 条漫整体缩放：捏合时整条内容（所有页）按同一比例放大，
-        // 放大后单指横向拖动平移整条、纵向照常连续滚动；双击在 1x/2x 间切换。
-        // 与左右翻页模式的"单页独立缩放"相互独立。
+        // 条漫整体缩放：列表保持原尺寸滚动，缩放由 graphicsLayer 渲染期
+        // 变换完成（不触发重排，位图按变换采样依然清晰，可放到看清像素点）。
+        // 捏合以手指位置为锚（横纵双向），放大后横向拖动平移整条、
+        // 纵向照常连续滚动；双击在 1x/2x 间切换；最高 100 倍。
         val zoom = remember { WebtoonZoomState() }
         var containerW by remember { mutableFloatStateOf(0f) }
+        var containerH by remember { mutableFloatStateOf(0f) }
         val density = LocalDensity.current
-        val scope = rememberCoroutineScope()
 
-        // 缩放后按比例补偿滚动位置，视线停留的内容不跳变
-        fun zoomTo(target: Float, centroidX: Float) {
-            if (containerW <= 0f) return
+        /** 缩放到 target 并以触点 (cx, cy) 为锚：
+         *  - 横向：setScale 围绕 cx 调整 offsetX，触点下内容横向不动；
+         *  - 纵向：手指下的内容坐标 y = scrollPos + cy/旧倍率，缩放后要
+         *    仍落在 cy → 滚动补偿 delta = cy×(1/旧 − 1/新)，O(1) 精确。 */
+        fun zoomTo(target: Float, cx: Float, cy: Float) {
+            if (containerW <= 0f || containerH <= 0f) return
             val old = zoom.scale
-            if (target == old) return
-            val idx = listState.firstVisibleItemIndex
-            val off = listState.firstVisibleItemScrollOffset
-            zoom.setScale(target, centroidX, containerW)
-            val k = zoom.scale / old
-            if (k != 1f) scope.launch { listState.scrollToItem(idx, (off * k).toInt()) }
+            val new = target.coerceIn(1f, 100f)
+            if (new == old) return
+            zoom.setScale(new, cx, containerW)
+            listState.dispatchRawDelta(cy * (1f / old - 1f / new))
         }
 
         Box(
@@ -97,51 +99,71 @@ fun ReaderPager(
                 .fillMaxSize()
                 .background(bg.toColor())
                 .clipToBounds()
-                .onSizeChanged { containerW = it.width.toFloat() }
+                .onSizeChanged {
+                    containerW = it.width.toFloat()
+                    containerH = it.height.toFloat()
+                }
                 .pointerInput(Unit) {
+                    // Initial 通道先于列表滚动处理：捏合 / 横向平移期间
+                    // 消费事件，列表不会同时滚动；纵向滚动照常放行
                     awaitEachGesture {
-                        awaitFirstDown(requireUnconsumed = false)
+                        awaitFirstDown(requireUnconsumed = false, pass = PointerEventPass.Initial)
                         var panH = false   // 本手势是否已锁定为横向平移
+                        var accX = 0f
+                        var accY = 0f
                         while (true) {
-                            val event: PointerEvent = awaitPointerEvent()
+                            val event: PointerEvent = awaitPointerEvent(PointerEventPass.Initial)
                             if (!event.changes.any { it.pressed }) break
-                            var handled = false
                             val zoomChange = event.calculateZoom()
                             if (zoomChange != 1f) {
-                                zoomTo(zoom.scale * zoomChange, event.calculateCentroid().x)
-                                handled = true
+                                val c = event.calculateCentroid()
+                                zoomTo(zoom.scale * zoomChange, c.x, c.y)
+                                event.changes.forEach { it.consume() }
                                 panH = false
+                                accX = 0f
+                                accY = 0f
+                                continue
                             }
-                            if (!handled && zoom.zoomed) {
+                            if (zoom.zoomed) {
                                 val pan = event.calculatePan()
-                                // 横向为主的拖动 → 平移整条内容；纵向拖动不消费，交给列表滚动
-                                if (pan != Offset.Zero && (panH || abs(pan.x) > abs(pan.y))) {
-                                    panH = true
+                                accX += pan.x
+                                accY += pan.y
+                                // 横向意图按累计位移判定，避免首帧抖动误判；
+                                // 锁定后消费事件，整条内容横向平移，纵向仍归列表
+                                if (!panH && abs(accX) > abs(accY) && abs(accX) > 24f) panH = true
+                                if (panH && pan != Offset.Zero) {
                                     zoom.panBy(pan.x, containerW)
-                                    handled = true
+                                    event.changes.forEach { it.consume() }
                                 }
                             }
-                            if (handled) event.changes.forEach { it.consume() }
                         }
                     }
                 }
         ) {
-            // 列宽 = 容器宽 × 缩放比：所有页随之等比变宽变高；横向位置由 offsetX 平移
-            val contentW = with(density) { (containerW * zoom.scale).toDp() }
+            // 列表宽度不变；高度按 1/倍率收缩，使组合窗口与可见内容一致
+            //（高倍率下只组合真正可见的一两屏，不浪费）；
+            // 缩放与横向平移由渲染层变换呈现
             LazyColumn(
                 state = listState,
                 modifier = Modifier
                     .then(
-                        if (contentW > 0.dp) Modifier.requiredWidth(contentW)
-                        else Modifier.fillMaxWidth()
+                        if (containerH > 0f)
+                            Modifier.requiredHeight(with(density) { (containerH / zoom.scale).toDp() })
+                        else Modifier
                     )
-                    .graphicsLayer { translationX = zoom.offsetX }
+                    .fillMaxWidth()
+                    .graphicsLayer {
+                        scaleX = zoom.scale
+                        scaleY = zoom.scale
+                        transformOrigin = TransformOrigin(0f, 0f)
+                        translationX = zoom.offsetX
+                    }
                     .background(bg.toColor())
             ) {
                 itemsIndexed(specs, key = { _, s -> s.hashCode() }) { _, spec ->
-                    WebtoonPage(vm, spec, bg, onToggleMenu) { pageX ->
+                    WebtoonPage(vm, spec, bg, onToggleMenu) { pos ->
                         // 触点从页坐标换算到视口坐标（页起点带横向偏移）
-                        scope.launch { zoomTo(if (zoom.zoomed) 1f else 2f, pageX + zoom.offsetX) }
+                        zoomTo(if (zoom.zoomed) 1f else 2f, pos.x + zoom.offsetX, pos.y)
                     }
                 }
                 item(key = "tail") {
@@ -193,7 +215,7 @@ fun ReaderPager(
     }
 }
 
-/** 横向模式单页槽位：加载位图 + 手势画布 + 翻页点击分区 */
+/** 横向模式单页槽位：两段式加载（先预览后高清）+ 手势画布 + 翻页点击分区 */
 @Composable
 fun PageSlot(
     vm: ReaderViewModel,
@@ -207,23 +229,36 @@ fun PageSlot(
     }
 ) {
     val bmp by produceState<android.graphics.Bitmap?>(null, spec, vm.settings.pipelineHash, vm) {
-        value = vm.loadBitmap(spec)
+        val full = vm.cachedFull(spec)
+        if (full != null) {
+            value = full
+        } else {
+            // 快速翻页时先显示低分辨率预览，高清解码完成后自动替换
+            value = vm.loadPreview(spec)
+            value = vm.loadBitmap(spec)
+        }
     }
     PageCanvas(bmp, bg, modifier, onTap = onZoneTap)
 }
 
 /** 条漫页：占满（可能已整体放大的）列宽、按图片比例决定高度；
- *  单击开菜单，双击切换整条缩放（由上层 ReaderPager 统一处理比例与偏移） */
+ *  两段式加载；单击开菜单，双击切换整条缩放（由上层统一处理比例与偏移） */
 @Composable
 private fun WebtoonPage(
     vm: ReaderViewModel,
     spec: PageSpec,
     bg: com.local.comicreader.data.ReadBackground,
     onToggleMenu: () -> Unit,
-    onDoubleTap: (Float) -> Unit
+    onDoubleTap: (Offset) -> Unit
 ) {
     val bmp by produceState<android.graphics.Bitmap?>(null, spec, vm.settings.pipelineHash, vm) {
-        value = vm.loadBitmap(spec)
+        val full = vm.cachedFull(spec)
+        if (full != null) {
+            value = full
+        } else {
+            value = vm.loadPreview(spec)
+            value = vm.loadBitmap(spec)
+        }
     }
     Box(
         Modifier
@@ -232,7 +267,7 @@ private fun WebtoonPage(
             .pointerInput(Unit) {
                 detectTapGestures(
                     onTap = { onToggleMenu() },
-                    onDoubleTap = { pos -> onDoubleTap(pos.x) }
+                    onDoubleTap = { pos -> onDoubleTap(pos) }
                 )
             }
     ) {
@@ -265,10 +300,11 @@ class WebtoonZoomState {
 
     val zoomed: Boolean get() = scale > 1.02f
 
-    /** 缩放到目标比例，保持 centroidX 处的内容不漂移；回到 1x 时归位 */
+    /** 缩放到目标比例，保持 centroidX 处的内容不漂移；回到 1x 时归位。
+     *  上限 100 倍：等效不限制，可放到看清像素点，仅防浮点溢出 */
     fun setScale(target: Float, centroidX: Float, containerW: Float) {
         val old = scale
-        val new = target.coerceIn(1f, 5f)
+        val new = target.coerceIn(1f, 100f)
         if (new == old) return
         if (new <= 1f) {
             scale = 1f

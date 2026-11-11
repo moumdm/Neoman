@@ -124,7 +124,6 @@ data class ReaderSettings(
     val rotation: Int = 0,
     val volumeKeyPaging: Boolean = true,
     val keepScreenOn: Boolean = true,
-    val autoPlaySec: Int = 0,          // 自动翻页间隔秒数，0=关闭
     val autoScrollSpeed: Int = 0,      // 自动滚动速度（px/s），0=关闭，仅条漫
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val eyeCare: Boolean = false,

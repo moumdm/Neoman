@@ -172,7 +172,7 @@ fun SettingsScreen(onBack: () -> Unit) {
             Spacer(Modifier.height(24.dp))
             Text("关于", style = MaterialTheme.typography.titleMedium)
             Text(
-                "Newman v1.1.1\n本地漫画阅读器 · 完全离线\n支持 JPG/PNG/WebP/GIF/BMP · PDF · EPUB · MOBI(实验) · ZIP/CBZ · RAR/CBR · 7Z/CB7",
+                "Newman v1.1.2\n本地漫画阅读器 · 完全离线\n支持 JPG/PNG/WebP/GIF/BMP · PDF · EPUB · MOBI(实验) · ZIP/CBZ · RAR/CBR · 7Z/CB7\n联系作者：1499871642@qq.com",
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
                 modifier = Modifier.padding(vertical = 8.dp)

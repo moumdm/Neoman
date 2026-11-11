@@ -70,6 +70,9 @@ class ReaderViewModel(
     private var provider: PageProvider? = null
     private val target = ImgDecode.targetLongSide(app)
 
+    /** 预览解码目标：约一屏长边，快速翻页时先出图 */
+    private val previewTarget = (target / 2).coerceAtLeast(1024)
+
     // 页位图缓存：按设备堆内存取 64~192MB。大缓存是快速翻页流畅的关键，
     // 100~200 页的书连续翻页时相邻页全部命中缓存，不再反复解码
     private val cache = BitmapPageCache(
@@ -153,12 +156,27 @@ class ReaderViewModel(
         }
     }
 
+    private fun fullKey(spec: PageSpec) =
+        "${book.id}:${spec.srcIndex}:${spec.part}:${settings.pipelineHash}"
+
     /** 页面位图管线（带缓存与并发去重），供每个页槽调用 */
     suspend fun loadBitmap(spec: PageSpec): Bitmap? {
         val p = provider ?: return null
-        val key = "${book.id}:${spec.srcIndex}:${spec.part}:${settings.pipelineHash}"
-        return cache.load(key) {
+        return cache.load(fullKey(spec)) {
             val raw = p.pageAt(spec.srcIndex, target) ?: return@load null
+            process(raw, spec)
+        }
+    }
+
+    /** 该页的高清位图是否已在缓存中 */
+    fun cachedFull(spec: PageSpec): Bitmap? = cache.get(fullKey(spec))
+
+    /** 两段式加载第一段：低分辨率快速预览（约一屏大小），出图后再后台换高清 */
+    suspend fun loadPreview(spec: PageSpec): Bitmap? {
+        val p = provider ?: return null
+        val key = "${fullKey(spec)}:pv"
+        return cache.load(key) {
+            val raw = p.pageAt(spec.srcIndex, previewTarget) ?: return@load null
             process(raw, spec)
         }
     }
